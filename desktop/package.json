@@ -1,0 +1,26 @@
+{
+  "name": "deepseek-harness-desktop",
+  "version": "1.0.0",
+  "description": "DeepSeek Harness Desktop Client",
+  "main": "main.js",
+  "scripts": {
+    "pack": "electron-builder --win --dir"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "electron": "^34.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.deepseek.harness.desktop",
+    "productName": "DeepSeek-Harness",
+    "asar": false,
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": "dir",
+      "icon": "../assets/icon.ico"
+    }
+  }
+}
