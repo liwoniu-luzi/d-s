@@ -1,23 +1,18 @@
 name: Build and Release Desktop App
 
 on:
-  # 1. 支持在 GitHub 网页端 Actions 页面手动点击 "Run workflow" 并输入版本号
   workflow_dispatch:
     inputs:
       version_tag:
-        description: '请输入发布的版本号（例如: v1.0.0）'
+        description: '发布版本号'
         required: true
         default: 'v1.0.0'
       release_title:
-        description: 'Release 标题名称'
+        description: 'Release 标题'
         required: false
-        default: 'DeepSeek Harness Desktop Release'
-
-  # 2. 支持在 GitHub 网页端 Releases 页面点击 "Publish release" 时自动触发
+        default: 'DeepSeek Harness Desktop v1.0.0'
   release:
     types: [published]
-
-  # 3. 支持 Git 命令行推送 Tag 触发
   push:
     tags:
       - 'v*'
@@ -29,10 +24,10 @@ jobs:
       contents: write
 
     steps:
-      - name: Checkout Source Code
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 计算当前发布的实际版本号 Tag
+      # 1. 确定版本号
       - name: Determine Release Tag
         id: get_tag
         shell: pwsh
@@ -47,25 +42,17 @@ jobs:
           Write-Host "Current Release Tag is: $tag"
           echo "RELEASE_TAG=$tag" >> $env:GITHUB_ENV
 
+      # 2. 安装 Node.js
       - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      - name: Setup PNPM
-        uses: pnpm/action-setup@v3
-        with:
-          version: latest
-
-      - name: Install & Build DSH Core
-        run: |
-          pnpm install
-          pnpm run build
-
-      - name: Assemble Portable Package Directory
+      # 3. 构建全套便携目录与自动拉取 DSH 核心包
+      - name: Assemble Portable Package & Fetch DSH
         shell: pwsh
         run: |
-          # 创建便携目录结构
+          Write-Host "Creating portable directories..."
           New-Item -ItemType Directory -Force -Path bundle\runtime\node
           New-Item -ItemType Directory -Force -Path bundle\runtime\git
           New-Item -ItemType Directory -Force -Path bundle\runtime\npm_global
@@ -75,52 +62,258 @@ jobs:
           New-Item -ItemType Directory -Force -Path bundle\cache\npm
           New-Item -ItemType Directory -Force -Path bundle\cache\webview
           New-Item -ItemType Directory -Force -Path bundle\assets
+          New-Item -ItemType Directory -Force -Path installer
 
-          # 1. 下载便携版 Node.js
+          # 下载 Node.js 便携版
+          Write-Host "Downloading Portable Node.js..."
           Invoke-WebRequest -Uri "https://nodejs.org/dist/v22.14.0/node-v22.14.0-win-x64.zip" -OutFile "node.zip"
           Expand-Archive -Path "node.zip" -DestinationPath "node-temp"
           Copy-Item -Path "node-temp\node-v22.14.0-win-x64\*" -Destination "bundle\runtime\node" -Recurse
 
-          # 2. 下载便携版 MinGit
+          # 下载 MinGit 便携版
+          Write-Host "Downloading MinGit..."
           Invoke-WebRequest -Uri "https://github.com/git-for-windows/git/releases/download/v2.48.1.windows.1/MinGit-2.48.1-64-bit.zip" -OutFile "mingit.zip"
           Expand-Archive -Path "mingit.zip" -DestinationPath "bundle\runtime\git"
 
-          # 3. 提取 MSVC 2015-2022 核心运行库 DLL（保证纯净系统 100% 运行）
+          # 提取 VC++ 2015-2022 核心运行库 DLL（确保全新系统无需安装运行库即可运行）
+          Write-Host "Extracting MSVC Runtime DLLs..."
           $Sys32 = [System.Environment]::SystemDirectory
           Copy-Item -Path "$Sys32\msvcp140.dll" -Destination "bundle\runtime\node\" -Force
           Copy-Item -Path "$Sys32\msvcp140_1.dll" -Destination "bundle\runtime\node\" -Force
           Copy-Item -Path "$Sys32\vcruntime140.dll" -Destination "bundle\runtime\node\" -Force
           Copy-Item -Path "$Sys32\vcruntime140_1.dll" -Destination "bundle\runtime\node\" -Force
 
-          # 4. 复制 DSH 核心代码与 node_modules
-          Copy-Item -Path "package.json" -Destination "bundle\app\"
-          Copy-Item -Path "node_modules" -Destination "bundle\app\" -Recurse
-          if (Test-Path "dist") { Copy-Item -Path "dist" -Destination "bundle\app\" -Recurse }
-          if (Test-Path "apps") { Copy-Item -Path "apps" -Destination "bundle\app\" -Recurse }
-          if (Test-Path "packages") { Copy-Item -Path "packages" -Destination "bundle\app\" -Recurse }
-          if (Test-Path "assets\icon.ico") {
-            Copy-Item -Path "assets\icon.ico" -Destination "bundle\assets\"
-          }
+          # 自动从 npm 安装官方 @deepseek-ai/dsh 核心应用及依赖
+          Write-Host "Installing @deepseek-ai/dsh from npm into bundle\app..."
+          Push-Location "bundle\app"
+          npm init -y
+          npm install @deepseek-ai/dsh@latest
+          Pop-Location
 
+      # 4. 自动生成并构建桌面客户端外壳 (Electron)
       - name: Build Electron Desktop Launcher
         shell: pwsh
         run: |
-          cd desktop
+          New-Item -ItemType Directory -Force -Path desktop
+
+          # 生成 desktop/package.json
+          Set-Content -Path "desktop\package.json" -Value @'
+          {
+            "name": "deepseek-harness-desktop",
+            "version": "1.0.0",
+            "main": "main.js",
+            "devDependencies": {
+              "electron": "^34.2.0",
+              "electron-builder": "^25.1.8"
+            },
+            "build": {
+              "appId": "com.deepseek.harness.desktop",
+              "productName": "DeepSeek-Harness",
+              "asar": false,
+              "directories": {
+                "output": "dist"
+              },
+              "win": {
+                "target": "dir"
+              }
+            }
+          }
+          '@
+
+          # 生成 desktop/main.js
+          Set-Content -Path "desktop\main.js" -Value @'
+          const { app, BrowserWindow, Tray, Menu, shell, dialog } = require("electron");
+          const path = require("path");
+          const { spawn } = require("child_process");
+          const http = require("http");
+
+          const isDev = !app.isPackaged;
+          const APP_DIR = isDev ? path.join(__dirname, "..") : path.dirname(app.getPath("exe"));
+
+          const DATA_DIR = path.join(APP_DIR, "data");
+          const CACHE_DIR = path.join(APP_DIR, "cache");
+          const WEBVIEW_CACHE = path.join(CACHE_DIR, "webview");
+          const TEMP_DIR = path.join(CACHE_DIR, "temp");
+          const NPM_CACHE = path.join(CACHE_DIR, "npm");
+          const NODE_DIR = path.join(APP_DIR, "runtime", "node");
+          const GIT_DIR = path.join(APP_DIR, "runtime", "git", "cmd");
+          const NPM_GLOBAL_BIN = path.join(APP_DIR, "runtime", "npm_global", "bin");
+
+          app.setPath("userData", WEBVIEW_CACHE);
+          app.setPath("temp", TEMP_DIR);
+
+          process.env.DSH_HOME = DATA_DIR;
+          process.env.npm_config_cache = NPM_CACHE;
+          process.env.npm_config_userconfig = path.join(DATA_DIR, ".npmrc");
+          process.env.TEMP = TEMP_DIR;
+          process.env.TMP = TEMP_DIR;
+
+          const oldPath = process.env.PATH || "";
+          process.env.PATH = `${NODE_DIR};${GIT_DIR};${NPM_GLOBAL_BIN};${oldPath}`;
+
+          let mainWindow = null;
+          let backendProcess = null;
+          let tray = null;
+          const DSH_PORT = 3080;
+          const DSH_URL = `http://127.0.0.1:${DSH_PORT}`;
+
+          function startBackend() {
+            const nodeExe = path.join(NODE_DIR, "node.exe");
+            const dshEntry = path.join(APP_DIR, "app", "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js");
+
+            backendProcess = spawn(nodeExe, [dshEntry, "web", "--port", DSH_PORT.toString()], {
+              cwd: path.join(APP_DIR, "app"),
+              env: { ...process.env },
+              windowsHide: true,
+              stdio: "ignore"
+            });
+
+            backendProcess.on("error", (err) => {
+              dialog.showErrorBox("启动失败", `无法启动后端引擎: ${err.message}`);
+            });
+          }
+
+          function waitForServer(url, timeoutMs = 30000, callback) {
+            const startTime = Date.now();
+            const interval = setInterval(() => {
+              http.get(url, (res) => {
+                if (res.statusCode === 200 || res.statusCode === 302) {
+                  clearInterval(interval);
+                  callback();
+                }
+              }).on("error", () => {
+                if (Date.now() - startTime > timeoutMs) {
+                  clearInterval(interval);
+                  dialog.showErrorBox("超时", "DSH 后台启动超时，请检查端口是否冲突。");
+                }
+              });
+            }, 400);
+          }
+
+          function createWindow() {
+            mainWindow = new BrowserWindow({
+              width: 1400,
+              height: 900,
+              minWidth: 1024,
+              minHeight: 700,
+              title: "DeepSeek Harness",
+              webPreferences: {
+                nodeIntegration: false,
+                contextIsolation: true
+              },
+              autoHideMenuBar: true,
+              show: false
+            });
+
+            waitForServer(DSH_URL, 30000, () => {
+              mainWindow.loadURL(DSH_URL);
+              mainWindow.once("ready-to-show", () => {
+                mainWindow.show();
+              });
+            });
+
+            mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+              shell.openExternal(url);
+              return { action: "deny" };
+            });
+
+            mainWindow.on("close", (event) => {
+              if (!app.isQuitting) {
+                event.preventDefault();
+                mainWindow.hide();
+              }
+            });
+          }
+
+          function createTray() {
+            const iconPath = path.join(APP_DIR, "assets", "icon.ico");
+            if (require("fs").existsSync(iconPath)) {
+              tray = new Tray(iconPath);
+            } else {
+              return;
+            }
+            const contextMenu = Menu.buildFromTemplate([
+              { label: "打开主界面", click: () => { mainWindow.show(); mainWindow.focus(); } },
+              { type: "separator" },
+              { label: "退出软件", click: () => {
+                  app.isQuitting = true;
+                  app.quit();
+                }
+              }
+            ]);
+            tray.setToolTip("DeepSeek Harness");
+            tray.setContextMenu(contextMenu);
+            tray.on("double-click", () => {
+              mainWindow.show();
+              mainWindow.focus();
+            });
+          }
+
+          app.whenReady().then(() => {
+            startBackend();
+            createWindow();
+            createTray();
+          });
+
+          app.on("before-quit", () => {
+            if (backendProcess) {
+              try {
+                backendProcess.kill();
+              } catch (e) {}
+            }
+          });
+          '@
+
+          # 构建桌面外壳
+          Push-Location desktop
           npm install
           npx electron-builder --win --dir
           Copy-Item -Path "dist\win-unpacked\*" -Destination "..\bundle\" -Recurse -Force
-          cd ..
+          Pop-Location
 
+      # 5. 生成 Inno Setup 安装包脚本
+      - name: Generate Inno Setup Script
+        shell: pwsh
+        run: |
+          Set-Content -Path "installer\setup.iss" -Value @'
+          [Setup]
+          AppName=DeepSeek Harness
+          AppVersion=1.0.0
+          DefaultDirName=D:\DeepSeek-Harness
+          DefaultGroupName=DeepSeek Harness
+          OutputDir=..\dist_installer
+          OutputBaseFilename=DeepSeek-Harness-Setup
+          Compression=lzma2/ultra64
+          SolidCompression=yes
+          PrivilegesRequired=lowest
+          DisableProgramGroupPage=yes
+          UninstallDisplayIcon={app}\DeepSeek-Harness.exe
+
+          [Files]
+          Source: "..\bundle\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+          [Icons]
+          Name: "{autodesktop}\DeepSeek Harness"; Filename: "{app}\DeepSeek-Harness.exe"; WorkingDir: "{app}"
+          Name: "{group}\DeepSeek Harness"; Filename: "{app}\DeepSeek-Harness.exe"; WorkingDir: "{app}"
+          Name: "{group}\卸载 DeepSeek Harness"; Filename: "{uninstallexe}"
+
+          [Run]
+          Filename: "{app}\DeepSeek-Harness.exe"; Description: "立即运行 DeepSeek Harness"; Flags: nowait postinstall skipifsilent
+          '@
+
+      # 6. 生成免安装绿色 ZIP
       - name: Create Portable ZIP
         shell: pwsh
         run: |
           Compress-Archive -Path bundle\* -DestinationPath DeepSeek-Harness-Portable.zip
 
+      # 7. 编译 Inno Setup 安装包 EXE
       - name: Build Inno Setup Installer (.exe)
         uses: Minionguyjpro/Inno-Setup-Action@v1.2.2
         with:
           path: installer/setup.iss
 
+      # 8. 发布到 GitHub Releases
       - name: Publish Release Assets to GitHub
         uses: softprops/action-gh-release@v2
         with:
