@@ -1,0 +1,136 @@
+name: Build and Release Desktop App
+
+on:
+  # 1. 支持在 GitHub 网页端 Actions 页面手动点击 "Run workflow" 并输入版本号
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: '请输入发布的版本号（例如: v1.0.0）'
+        required: true
+        default: 'v1.0.0'
+      release_title:
+        description: 'Release 标题名称'
+        required: false
+        default: 'DeepSeek Harness Desktop Release'
+
+  # 2. 支持在 GitHub 网页端 Releases 页面点击 "Publish release" 时自动触发
+  release:
+    types: [published]
+
+  # 3. 支持 Git 命令行推送 Tag 触发
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      # 计算当前发布的实际版本号 Tag
+      - name: Determine Release Tag
+        id: get_tag
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ github.event.inputs.version_tag }}"
+          } elseif ("${{ github.event_name }}" -eq "release") {
+            $tag = "${{ github.event.release.tag_name }}"
+          } else {
+            $tag = "${{ github.ref_name }}"
+          }
+          Write-Host "Current Release Tag is: $tag"
+          echo "RELEASE_TAG=$tag" >> $env:GITHUB_ENV
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup PNPM
+        uses: pnpm/action-setup@v3
+        with:
+          version: latest
+
+      - name: Install & Build DSH Core
+        run: |
+          pnpm install
+          pnpm run build
+
+      - name: Assemble Portable Package Directory
+        shell: pwsh
+        run: |
+          # 创建便携目录结构
+          New-Item -ItemType Directory -Force -Path bundle\runtime\node
+          New-Item -ItemType Directory -Force -Path bundle\runtime\git
+          New-Item -ItemType Directory -Force -Path bundle\runtime\npm_global
+          New-Item -ItemType Directory -Force -Path bundle\app
+          New-Item -ItemType Directory -Force -Path bundle\data
+          New-Item -ItemType Directory -Force -Path bundle\cache\temp
+          New-Item -ItemType Directory -Force -Path bundle\cache\npm
+          New-Item -ItemType Directory -Force -Path bundle\cache\webview
+          New-Item -ItemType Directory -Force -Path bundle\assets
+
+          # 1. 下载便携版 Node.js
+          Invoke-WebRequest -Uri "https://nodejs.org/dist/v22.14.0/node-v22.14.0-win-x64.zip" -OutFile "node.zip"
+          Expand-Archive -Path "node.zip" -DestinationPath "node-temp"
+          Copy-Item -Path "node-temp\node-v22.14.0-win-x64\*" -Destination "bundle\runtime\node" -Recurse
+
+          # 2. 下载便携版 MinGit
+          Invoke-WebRequest -Uri "https://github.com/git-for-windows/git/releases/download/v2.48.1.windows.1/MinGit-2.48.1-64-bit.zip" -OutFile "mingit.zip"
+          Expand-Archive -Path "mingit.zip" -DestinationPath "bundle\runtime\git"
+
+          # 3. 提取 MSVC 2015-2022 核心运行库 DLL（保证纯净系统 100% 运行）
+          $Sys32 = [System.Environment]::SystemDirectory
+          Copy-Item -Path "$Sys32\msvcp140.dll" -Destination "bundle\runtime\node\" -Force
+          Copy-Item -Path "$Sys32\msvcp140_1.dll" -Destination "bundle\runtime\node\" -Force
+          Copy-Item -Path "$Sys32\vcruntime140.dll" -Destination "bundle\runtime\node\" -Force
+          Copy-Item -Path "$Sys32\vcruntime140_1.dll" -Destination "bundle\runtime\node\" -Force
+
+          # 4. 复制 DSH 核心代码与 node_modules
+          Copy-Item -Path "package.json" -Destination "bundle\app\"
+          Copy-Item -Path "node_modules" -Destination "bundle\app\" -Recurse
+          if (Test-Path "dist") { Copy-Item -Path "dist" -Destination "bundle\app\" -Recurse }
+          if (Test-Path "apps") { Copy-Item -Path "apps" -Destination "bundle\app\" -Recurse }
+          if (Test-Path "packages") { Copy-Item -Path "packages" -Destination "bundle\app\" -Recurse }
+          if (Test-Path "assets\icon.ico") {
+            Copy-Item -Path "assets\icon.ico" -Destination "bundle\assets\"
+          }
+
+      - name: Build Electron Desktop Launcher
+        shell: pwsh
+        run: |
+          cd desktop
+          npm install
+          npx electron-builder --win --dir
+          Copy-Item -Path "dist\win-unpacked\*" -Destination "..\bundle\" -Recurse -Force
+          cd ..
+
+      - name: Create Portable ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive -Path bundle\* -DestinationPath DeepSeek-Harness-Portable.zip
+
+      - name: Build Inno Setup Installer (.exe)
+        uses: Minionguyjpro/Inno-Setup-Action@v1.2.2
+        with:
+          path: installer/setup.iss
+
+      - name: Publish Release Assets to GitHub
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ github.event.inputs.release_title || env.RELEASE_TAG }}
+          files: |
+            dist_installer/DeepSeek-Harness-Setup.exe
+            DeepSeek-Harness-Portable.zip
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
