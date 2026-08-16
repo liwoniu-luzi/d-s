@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version_tag:
-        description: '发布版本号'
+        description: '发布版本号 (例如: v1.0.0)'
         required: true
         default: 'v1.0.0'
       release_title:
@@ -48,7 +48,7 @@ jobs:
         with:
           node-version: 22
 
-      # 3. 构建全套便携目录与自动拉取 DSH 核心包
+      # 3. 构建全套便携目录与拉取 DSH 官方包
       - name: Assemble Portable Package & Fetch DSH
         shell: pwsh
         run: |
@@ -63,6 +63,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path bundle\cache\webview
           New-Item -ItemType Directory -Force -Path bundle\assets
           New-Item -ItemType Directory -Force -Path installer
+          New-Item -ItemType Directory -Force -Path dist_installer
 
           # 下载 Node.js 便携版
           Write-Host "Downloading Portable Node.js..."
@@ -75,7 +76,7 @@ jobs:
           Invoke-WebRequest -Uri "https://github.com/git-for-windows/git/releases/download/v2.48.1.windows.1/MinGit-2.48.1-64-bit.zip" -OutFile "mingit.zip"
           Expand-Archive -Path "mingit.zip" -DestinationPath "bundle\runtime\git"
 
-          # 提取 VC++ 2015-2022 核心运行库 DLL（确保全新系统无需安装运行库即可运行）
+          # 提取 MSVC 2015-2022 核心运行库 DLL（确保全新纯净系统无需额外装库）
           Write-Host "Extracting MSVC Runtime DLLs..."
           $Sys32 = [System.Environment]::SystemDirectory
           Copy-Item -Path "$Sys32\msvcp140.dll" -Destination "bundle\runtime\node\" -Force
@@ -83,14 +84,14 @@ jobs:
           Copy-Item -Path "$Sys32\vcruntime140.dll" -Destination "bundle\runtime\node\" -Force
           Copy-Item -Path "$Sys32\vcruntime140_1.dll" -Destination "bundle\runtime\node\" -Force
 
-          # 自动从 npm 安装官方 @deepseek-ai/dsh 核心应用及依赖
+          # 自动从 npm 安装官方 @deepseek-ai/dsh 应用及其全部依赖
           Write-Host "Installing @deepseek-ai/dsh from npm into bundle\app..."
           Push-Location "bundle\app"
           npm init -y
           npm install @deepseek-ai/dsh@latest
           Pop-Location
 
-      # 4. 自动生成并构建桌面客户端外壳 (Electron)
+      # 4. 构建桌面客户端外壳 (Electron)
       - name: Build Electron Desktop Launcher
         shell: pwsh
         run: |
@@ -173,7 +174,7 @@ jobs:
             });
           }
 
-          function waitForServer(url, timeoutMs = 30000, callback) {
+          function waitForServer(url, timeoutMs = 35000, callback) {
             const startTime = Date.now();
             const interval = setInterval(() => {
               http.get(url, (res) => {
@@ -205,7 +206,7 @@ jobs:
               show: false
             });
 
-            waitForServer(DSH_URL, 30000, () => {
+            waitForServer(DSH_URL, 35000, () => {
               mainWindow.loadURL(DSH_URL);
               mainWindow.once("ready-to-show", () => {
                 mainWindow.show();
@@ -307,13 +308,17 @@ jobs:
         run: |
           Compress-Archive -Path bundle\* -DestinationPath DeepSeek-Harness-Portable.zip
 
-      # 7. 编译 Inno Setup 安装包 EXE
-      - name: Build Inno Setup Installer (.exe)
-        uses: Minionguyjpro/Inno-Setup-Action@v1.2.2
-        with:
-          path: installer/setup.iss
+      # 7. 使用 Windows 原生 ISCC 编译器直接打包（原生稳定，100% 避免第三方 Action Bug）
+      - name: Compile Installer with Native Inno Setup
+        shell: pwsh
+        run: |
+          Write-Host "Installing Inno Setup via Chocolatey..."
+          choco install innosetup -y --no-progress
+          
+          Write-Host "Compiling setup.iss with native iscc.exe..."
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\setup.iss /Q
 
-      # 8. 发布到 GitHub Releases
+      # 8. 发布构建产物到 GitHub Release
       - name: Publish Release Assets to GitHub
         uses: softprops/action-gh-release@v2
         with:
